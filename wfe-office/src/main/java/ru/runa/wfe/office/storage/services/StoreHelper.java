@@ -74,8 +74,8 @@ public class StoreHelper {
     }
 
     public ExecutionResult findByComposite(DataBindings dataBindings) throws Exception {
+
         DataBinding triggerBinding = getTriggerBinding(dataBindings);
-        List<DataBinding> subqueryBindings = getSubqueryBindings(dataBindings.getBindings());
 
         QueryProperties trigger = new QueryProperties(
                 extractProperties(triggerBinding),
@@ -86,7 +86,7 @@ public class StoreHelper {
 
         List<QueryProperties> subqueries = new ArrayList<>();
 
-        for (DataBinding binding : subqueryBindings) {
+        for (DataBinding binding : getSubqueryBindings(dataBindings.getBindings())) {
             UserType userType = getUserType(binding);
 
             subqueries.add(new QueryProperties(

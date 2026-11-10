@@ -12,4 +12,5 @@ public class QueryProperties {
     private final UserType userType;
     private final String condition;
     private final QueryRole queryRole;
+    private final LogicalOperator logicalOperator;
 }

@@ -11,6 +11,7 @@ import ru.runa.wfe.office.storage.binding.CompositeQueryProperties;
 import ru.runa.wfe.office.storage.binding.DataBinding;
 import ru.runa.wfe.office.storage.binding.DataBindings;
 import ru.runa.wfe.office.storage.binding.ExecutionResult;
+import ru.runa.wfe.office.storage.binding.LogicalOperator;
 import ru.runa.wfe.office.storage.binding.QueryProperties;
 import ru.runa.wfe.office.storage.binding.QueryRole;
 import ru.runa.wfe.var.UserType;
@@ -81,7 +82,8 @@ public class StoreHelper {
                 extractProperties(triggerBinding),
                 getUserType(triggerBinding),
                 triggerBinding.getCondition(),
-                triggerBinding.getQueryRole()
+                triggerBinding.getQueryRole(),
+                null
         );
 
         List<QueryProperties> subqueries = new ArrayList<>();
@@ -89,11 +91,16 @@ public class StoreHelper {
         for (DataBinding binding : getSubqueryBindings(dataBindings.getBindings())) {
             UserType userType = getUserType(binding);
 
+            LogicalOperator logicalOperator = binding.getLogicalOperator() == null
+                    ? LogicalOperator.AND
+                    : binding.getLogicalOperator();
+
             subqueries.add(new QueryProperties(
                     extractProperties(binding, new UserTypeFormat(userType)),
                     userType,
                     binding.getCondition(),
-                    binding.getQueryRole()
+                    binding.getQueryRole(),
+                    logicalOperator
             ));
         }
 

@@ -21,6 +21,9 @@ import ru.runa.wfe.office.excel.ExcelConstraints;
 import ru.runa.wfe.office.excel.OnSheetConstraints;
 import ru.runa.wfe.office.storage.binding.CompositeQueryProperties;
 import ru.runa.wfe.office.storage.binding.ExecutionResult;
+import ru.runa.wfe.office.storage.binding.LogicalOperator;
+import ru.runa.wfe.office.storage.binding.QueryProperties;
+import ru.runa.wfe.office.storage.binding.QueryRole;
 import ru.runa.wfe.office.storage.convert.BaseSqlValueConverter;
 import ru.runa.wfe.office.storage.convert.ConverterContext;
 import ru.runa.wfe.office.storage.projection.ProjectionModel;
@@ -40,9 +43,12 @@ public abstract class JdbcStoreService implements StoreService {
     private static final Log log = LogFactory.getLog(JdbcStoreService.class);
 
     protected static final String SQL_TABLE_NAME_PREFIX = "SHEET";
+    protected static final String SQL_TRIGGER_ALIAS = "t";
+    protected static final String SQL_SUBQUERY_ALIAS_PREFIX = "s";
     protected static final String SQL_LIST_SEPARATOR = ", ";
     protected static final String SQL_TRUE_SEARCH_CONDITION = "1 = 1";
     protected static final String SQL_AND = " and ";
+    protected static final String SQL_OR = " or ";
     protected static final String SQL_CREATE_TABLE = "create table \"{0}\" ({1})";
     protected static final String SQL_COLUMN_DEFINITION = "\"{0}\" {1}";
     protected static final String SQL_INSERT = "insert into \"{0}\" ({1}) values ({2})";
@@ -52,6 +58,11 @@ public abstract class JdbcStoreService implements StoreService {
     protected static final String SQL_UPDATE = "update \"{0}\" set {1} where {2}";
     protected static final String SQL_COLUMN_SET = "\"{0}\" = {1}";
     protected static final String SQL_DELETE = "delete from \"{0}\" where {1}";
+    protected static final String SQL_SELECT_WITH_ALIAS = "select {0} from \"{1}\" {2} where {3}";
+    protected static final String SQL_SELECT_ONE = "select 1 from \"{0}\" {1} where {2}";
+    protected static final String SQL_ALIAS_COLUMN = "{0}.\"{1}\"";
+    protected static final String SQL_EXISTS = "exists ({0})";
+    protected static final String SQL_NOT_EXISTS = "not exists ({0})";
 
     private static final String SPACE = " ";
     private static final String LIKE_LITERAL = "LIKE";
@@ -73,6 +84,10 @@ public abstract class JdbcStoreService implements StoreService {
     }
 
     protected String tableName() {
+        return tableName(constraints);
+    }
+
+    protected String tableName(ExcelConstraints constraints) {
         OnSheetConstraints osc = (OnSheetConstraints) constraints;
         String tableName = osc.getSheetName();
         if (Strings.isNullOrEmpty(tableName)) {
@@ -116,13 +131,35 @@ public abstract class JdbcStoreService implements StoreService {
         }
     }
 
+    protected void initParams(CompositeQueryProperties queryProperties) throws Exception {
+        QueryProperties trigger = queryProperties.getTrigger();
+        initParams(trigger.getProperties(), trigger.getUserType());
+        ExcelConstraints triggerConstraints = constraints;
+        try {
+            for (QueryProperties subquery : queryProperties.getSubqueries()) {
+                constraints = (ExcelConstraints) subquery.getProperties().get(PROP_CONSTRAINTS);
+                if (ds != null) {
+                    createTableIfNotExist(subquery.getUserType());
+                }
+            }
+        } finally {
+            constraints = triggerConstraints;
+        }
+    }
+
     protected void createTableIfNotExist(UserType userType) throws Exception {
         String tableName = tableName();
         if (!executeSql(MessageFormat.format(tableExistsSql(), tableName))) {
-            String columnDefinitions = "";
+            StringBuilder columnDefinitions = new StringBuilder();
             for (VariableDefinition vd : userType.getAttributes()) {
-                columnDefinitions += (columnDefinitions.length() > 0 ? SQL_LIST_SEPARATOR : "") + MessageFormat.format(SQL_COLUMN_DEFINITION,
-                        adjustIdentifier(vd.getName()), typeMap().get(vd.getFormatNotNull().getClass()));
+                if (columnDefinitions.length() > 0) {
+                    columnDefinitions.append(SQL_LIST_SEPARATOR);
+                }
+                columnDefinitions.append(MessageFormat.format(
+                        SQL_COLUMN_DEFINITION,
+                        adjustIdentifier(vd.getName()),
+                        typeMap().get(vd.getFormatNotNull().getClass())
+                ));
             }
             executeSql(MessageFormat.format(SQL_CREATE_TABLE, tableName, columnDefinitions));
         }
@@ -189,8 +226,61 @@ public abstract class JdbcStoreService implements StoreService {
 
     @Override
     public ExecutionResult findByComposite(CompositeQueryProperties queryProperties) throws Exception {
-        //TODO нужно реализовать для JDBC внутреннего хранилища (по умолчанию Excel)
-        return null;
+        initParams(queryProperties);
+        QueryProperties trigger = queryProperties.getTrigger();
+        List<QueryProperties> subqueries = queryProperties.getSubqueries();
+        UserType triggerUserType = trigger.getUserType();
+        String triggerTableName = tableName();
+
+        StringBuilder columns = new StringBuilder();
+        for (VariableDefinition vd : triggerUserType.getAttributes()) {
+            columns.append(columns.length() > 0 ? SQL_LIST_SEPARATOR : "")
+                    .append(MessageFormat.format(SQL_ALIAS_COLUMN, SQL_TRIGGER_ALIAS, adjustIdentifier(vd.getName())));
+        }
+
+        StringBuilder where = new StringBuilder("(")
+                .append(compositeCondition(trigger.getCondition(), SQL_TRIGGER_ALIAS, triggerUserType))
+                .append(")");
+
+        if (!subqueries.isEmpty()) {
+            where.append(SQL_AND).append("(");
+            for (int i = 0; i < subqueries.size(); i++) {
+                QueryProperties subqueryProperties = subqueries.get(i);
+                String subqueryAlias = SQL_SUBQUERY_ALIAS_PREFIX + (i + 1);
+                String subqueryCondition = compositeCondition(subqueryProperties.getCondition(), subqueryAlias, triggerUserType);
+                ExcelConstraints subqueryConstraints = (ExcelConstraints) subqueryProperties.getProperties().get(PROP_CONSTRAINTS);
+                String subqueryTableName = tableName(subqueryConstraints);
+                String subquerySql = MessageFormat.format(SQL_SELECT_ONE, subqueryTableName, subqueryAlias, subqueryCondition);
+                String existsSql = subqueryProperties.getQueryRole() == QueryRole.NOT_EXISTS
+                        ? MessageFormat.format(SQL_NOT_EXISTS, subquerySql)
+                        : MessageFormat.format(SQL_EXISTS, subquerySql);
+                if (i > 0) {
+                    LogicalOperator logicalOperator = subqueryProperties.getLogicalOperator();
+                    where.append(logicalOperator == LogicalOperator.OR ? SQL_OR : SQL_AND);
+                }
+                where.append(existsSql);
+            }
+            where.append(")");
+        }
+
+        String sql = MessageFormat.format(SQL_SELECT_WITH_ALIAS, columns, triggerTableName, SQL_TRIGGER_ALIAS, where);
+
+        try (Connection conn = ds.getConnection()) {
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                try (ResultSet rs = ps.executeQuery()) {
+                    List<UserTypeMap> result = Lists.newArrayList();
+                    while (rs.next()) {
+                        UserTypeMap userTypeMap = new UserTypeMap(triggerUserType);
+                        for (VariableDefinition vd : triggerUserType.getAttributes()) {
+                            String variableName = vd.getName();
+                            userTypeMap.put(variableName, adjustValue(rs.getObject(adjustIdentifier(variableName))));
+                        }
+                        result.add(userTypeMap);
+                    }
+                    return new ExecutionResult(result);
+                }
+            }
+        }
     }
 
     @Override
@@ -296,6 +386,67 @@ public abstract class JdbcStoreService implements StoreService {
             toAppend = sqlValue(wfVariable.getValue(), wfVariable.getDefinition().getFormatNotNull());
         }
         return toAppend;
+    }
+
+    private String compositeCondition(String condition, String alias, UserType triggerUserType) {
+        if (Strings.isNullOrEmpty(condition)) {
+            return SQL_TRUE_SEARCH_CONDITION;
+        }
+        if (!isConditionValid(condition)) {
+            throw new WrongOperatorException(condition);
+        }
+
+        condition = ConditionProcessor.hideSpacesInAttributeNames(condition);
+        StringBuilder sb = new StringBuilder();
+        StringTokenizer st = new StringTokenizer(condition);
+
+        while (st.hasMoreTokens()) {
+            String token = st.nextToken();
+
+            if (token.startsWith("[") && token.endsWith("]")) {
+                String[] parts = token.split("\\.", 2);
+
+                if (parts.length == 2) {
+                    String parentTypeName = parts[0].substring(1, parts[0].length() - 1)
+                            .replace(ConditionProcessor.UNICODE_CHARACTER_OVERLINE, ' ');
+
+                    String attributeName = parts[1].substring(1, parts[1].length() - 1)
+                            .replace(ConditionProcessor.UNICODE_CHARACTER_OVERLINE, ' ');
+
+                    Preconditions.checkArgument(
+                            triggerUserType.getName().equals(parentTypeName),
+                            "Unsupported parent UserType '%s' in condition '%s'",
+                            parentTypeName,
+                            condition
+                    );
+
+                    sb.append(SPACE).append(MessageFormat.format(SQL_ALIAS_COLUMN, SQL_TRIGGER_ALIAS, adjustIdentifier(attributeName)));
+                } else {
+                    String attributeName = token.substring(1, token.length() - 1)
+                            .replace(ConditionProcessor.UNICODE_CHARACTER_OVERLINE, ' ');
+                    sb.append(SPACE).append(MessageFormat.format(SQL_ALIAS_COLUMN, alias, adjustIdentifier(attributeName)));
+                }
+            } else if (token.equalsIgnoreCase(LIKE_LITERAL)) {
+                sb.append(SPACE).append(LIKE_LITERAL).append(SPACE);
+
+                if (st.hasMoreTokens()) {
+                    String nextToken = st.nextToken();
+                    if (nextToken.startsWith("@")) {
+                        sb.append(extractVariableValue(nextToken));
+                    } else {
+                        sb.append(nextToken);
+                    }
+                }
+            } else if (token.startsWith("@")) {
+                sb.append(SPACE).append(extractVariableValue(token));
+            } else if (token.equals(DOUBLE_EQUALS)) {
+                sb.append(SPACE).append(EQUALS);
+            } else {
+                sb.append(SPACE).append(token);
+            }
+        }
+
+        return sb.toString();
     }
 
     protected UserType userType(WfVariable variable) {
